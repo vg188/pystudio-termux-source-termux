@@ -28,11 +28,11 @@ termux_step_host_build() {
 	)
 	termux_download_ubuntu_packages "${ubuntu_packages[@]}"
 
-	# Need Python module pysol_cards
+	# Need Python modules pysol_cards, six
 	local hostbuild_venv_dir="${TERMUX_PKG_HOSTBUILD_DIR}/venv-dir"
 	python3 -m venv --system-site-packages "$hostbuild_venv_dir"
 	. "$hostbuild_venv_dir/bin/activate"
-	python3 -m pip install --no-input --disable-pip-version-check pysol-cards
+	python3 -m pip install --no-input --disable-pip-version-check pysol-cards six
 }
 
 termux_step_pre_configure() {
