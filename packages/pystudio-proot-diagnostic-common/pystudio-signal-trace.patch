@@ -1,0 +1,88 @@
+diff --git a/src/tracee/event.c b/src/tracee/event.c
+index 7ccf31f..76f6478 100644
+--- a/src/tracee/event.c
++++ b/src/tracee/event.c
+@@ -391,6 +391,14 @@ int event_loop()
+ 		}
+ 
+ 		signal = handle_tracee_event(tracee, tracee_status);
++#ifdef PYSTUDIO_FORK_TRACE
++		note(tracee, INFO, INTERNAL,
++			"pystudio signal trace: event-loop pid=%ld vpid=%" PRIu64 " status=0x%x computed_signal=%d restart_how=%d chain=%d restore_seccomp=%d suppressed=%d",
++			(long) tracee->pid, tracee->vpid, tracee_status, signal,
++			tracee->restart_how, tracee->chain.syscalls != NULL,
++			tracee->restore_original_regs_after_seccomp_event,
++			tracee->chain.suppressed_signal);
++#endif
+ 		(void) restart_tracee(tracee, signal);
+ 	}
+ 
+@@ -456,6 +464,15 @@ int handle_tracee_event(Tracee *tracee, int tracee_status)
+ 		/* Don't use WSTOPSIG() to extract the signal
+ 		 * since it clears the PTRACE_EVENT_* bits. */
+ 		signal = (tracee_status & 0xfff00) >> 8;
++#ifdef PYSTUDIO_FORK_TRACE
++		if (signal != (SIGTRAP | 0x80))
++			note(tracee, INFO, INTERNAL,
++				"pystudio signal trace: stopped pid=%ld vpid=%" PRIu64 " raw_status=0x%x stop_signal=%d restart_how=%d chain=%d restore_seccomp=%d suppressed=%d",
++				(long) tracee->pid, tracee->vpid, tracee_status, signal,
++				tracee->restart_how, tracee->chain.syscalls != NULL,
++				tracee->restore_original_regs_after_seccomp_event,
++				tracee->chain.suppressed_signal);
++#endif
+ 
+ 		switch (signal) {
+ 			static bool deliver_sigtrap = false;
+@@ -757,6 +774,14 @@ int handle_tracee_event(Tracee *tracee, int tracee_status)
+ 		}
+ 
+ 		default:
++#ifdef PYSTUDIO_FORK_TRACE
++			note(tracee, INFO, INTERNAL,
++				"pystudio signal trace: default-before pid=%ld vpid=%" PRIu64 " signal=%d chain=%d restore_seccomp=%d suppressed=%d",
++				(long) tracee->pid, tracee->vpid, signal,
++				tracee->chain.syscalls != NULL,
++				tracee->restore_original_regs_after_seccomp_event,
++				tracee->chain.suppressed_signal);
++#endif
+ 			/* Deliver this signal as-is,
+ 			 * unless we're chaining syscall.  */
+ 			if (tracee->chain.syscalls != NULL || tracee->restore_original_regs_after_seccomp_event) {
+@@ -766,6 +791,12 @@ int handle_tracee_event(Tracee *tracee, int tracee_status)
+ 				tracee->chain.suppressed_signal = signal;
+ 				signal = 0;
+ 			}
++#ifdef PYSTUDIO_FORK_TRACE
++			note(tracee, INFO, INTERNAL,
++				"pystudio signal trace: default-after pid=%ld vpid=%" PRIu64 " signal=%d suppressed=%d",
++				(long) tracee->pid, tracee->vpid, signal,
++				tracee->chain.suppressed_signal);
++#endif
+ 			break;
+ 		}
+ 	}
+@@ -809,6 +840,12 @@ bool restart_tracee(Tracee *tracee, int signal)
+ 	int status;
+ 
+ 	/* Put in the "stopped"/"waiting for ptracee" state?.  */
++#ifdef PYSTUDIO_FORK_TRACE
++	note(tracee, INFO, INTERNAL,
++		"pystudio signal trace: restart-request pid=%ld vpid=%" PRIu64 " signal=%d restart_how=%d wait_pid=%ld",
++		(long) tracee->pid, tracee->vpid, signal, tracee->restart_how,
++		(long) tracee->as_ptracer.wait_pid);
++#endif
+ 	if (tracee->as_ptracer.wait_pid != 0 || signal == -1)
+ 		return false;
+ 
+@@ -816,6 +853,11 @@ bool restart_tracee(Tracee *tracee, int signal)
+ 	 * at the next entry or exit of a system call. */
+ 	assert(tracee->restart_how != 0);
+ 	status = ptrace(tracee->restart_how, tracee->pid, NULL, signal);
++#ifdef PYSTUDIO_FORK_TRACE
++	note(tracee, status < 0 ? WARNING : INFO, status < 0 ? SYSTEM : INTERNAL,
++		"pystudio signal trace: restart-result pid=%ld vpid=%" PRIu64 " signal=%d request=%d status=%d",
++		(long) tracee->pid, tracee->vpid, signal, tracee->restart_how, status);
++#endif
+ 	if (status < 0)
+ 		return false; /* The process likely died in a syscall.  */
+ 

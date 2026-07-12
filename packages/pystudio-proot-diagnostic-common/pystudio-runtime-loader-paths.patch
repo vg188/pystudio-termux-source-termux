@@ -1,0 +1,205 @@
+diff --git a/src/.check_process_vm.c b/src/.check_process_vm.c
+index da7bd4b..9926579 100644
+--- a/src/.check_process_vm.c
++++ b/src/.check_process_vm.c
+@@ -1,5 +1,9 @@
+ #include <sys/uio.h>
+ #include <stdlib.h>
++
++#ifdef PYSTUDIO_DISABLE_PROCESS_VM
++#error "process_vm disabled for PyStudio diagnostic build"
++#endif
+ 
+ int main(void)
+ {
+diff --git a/src/.check_seccomp_filter.c b/src/.check_seccomp_filter.c
+index 4b40cc7..9438053 100644
+--- a/src/.check_seccomp_filter.c
++++ b/src/.check_seccomp_filter.c
+@@ -3,6 +3,10 @@
+ #include <linux/filter.h>  /* struct sock_*, */
+ #include <linux/audit.h>   /* AUDIT_ARCH_*, */
+ #include <stddef.h>        /* offsetof(3), */
++
++#ifdef PYSTUDIO_DISABLE_SECCOMP_FILTER
++#error "seccomp filter disabled for PyStudio diagnostic build"
++#endif
+ 
+ int main(void)
+ {
+diff --git a/src/GNUmakefile b/src/GNUmakefile
+index 0adb88b..a062903 100644
+--- a/src/GNUmakefile
++++ b/src/GNUmakefile
+@@ -98,7 +98,7 @@ $(eval $(call define_from_arch.h,,HAS_LOADER_32BIT))
+ $(eval $(call define_from_arch.h,,HAS_POKEDATA_WORKAROUND))
+ 
+ ifdef PROOT_UNBUNDLE_LOADER
+-  CFLAGS += "-DPROOT_UNBUNDLE_LOADER=\"$(PROOT_UNBUNDLE_LOADER)\""
++  CFLAGS += "-DPROOT_UNBUNDLE_LOADER"
+ proot: | loader/loader
+ ifdef HAS_LOADER_32BIT
+ proot: | loader/loader-m32
+@@ -256,6 +256,7 @@ DEPS = $(OBJECTS:.o=.d) $(LOADER_OBJECTS:.o=.d) $(LOADER-m32_OBJECTS:.o=.d) $(CH
+ 
+ PREFIX ?= /usr/local
+ BINDIR ?= $(PREFIX)/bin
++PROOT_UNBUNDLE_LOADER_INSTALL_DIR ?= $(PROOT_UNBUNDLE_LOADER)
+ 
+ .PHONY: clean distclean install uninstall
+ clean distclean:
+@@ -264,17 +265,17 @@ clean distclean:
+ install: proot
+ 	$($(quiet)INSTALL) -D $< $(DESTDIR)$(BINDIR)/$<
+ ifdef PROOT_UNBUNDLE_LOADER
+-	$(INSTALL) -D loader/loader $(PROOT_UNBUNDLE_LOADER)/loader
++	$(INSTALL) -D loader/loader $(PROOT_UNBUNDLE_LOADER_INSTALL_DIR)/loader
+ ifdef HAS_LOADER_32BIT
+-	$(INSTALL) -D loader/loader-m32 $(PROOT_UNBUNDLE_LOADER)/loader32
++	$(INSTALL) -D loader/loader-m32 $(PROOT_UNBUNDLE_LOADER_INSTALL_DIR)/loader32
+ endif
+ endif
+ 
+ uninstall:
+ 	-$(RM) -f $(DESTDIR)$(BINDIR)/proot
+ ifdef PROOT_UNBUNDLE_LOADER
+-	$(INSTALL) -D loader/loader $(PROOT_UNBUNDLE_LOADER)/loader
++	-$(RM) -f $(PROOT_UNBUNDLE_LOADER_INSTALL_DIR)/loader
+ ifdef HAS_LOADER_32BIT
+-	$(INSTALL) -D loader/loader-m32 $(PROOT_UNBUNDLE_LOADER)/loader32
++	-$(RM) -f $(PROOT_UNBUNDLE_LOADER_INSTALL_DIR)/loader32
+ endif
+ endif
+diff --git a/src/execve/enter.c b/src/execve/enter.c
+index c562d14..a0b9fd5 100644
+--- a/src/execve/enter.c
++++ b/src/execve/enter.c
+@@ -555,6 +555,93 @@ end:
+ }
+ #endif
+ 
++#if defined(PROOT_UNBUNDLE_LOADER)
++static char *format_unbundled_loader_path(const char *prefix, bool wants_32bit_version)
++{
++	const char *name = wants_32bit_version ? "loader32" : "loader";
++
++	return talloc_asprintf(talloc_autofree_context(),
++			"%s/libexec/proot/%s", prefix, name);
++}
++
++static char *derive_prefix_from_executable(void)
++{
++	char path[PATH_MAX];
++	char *slash;
++	ssize_t length;
++
++	length = readlink("/proc/self/exe", path, sizeof(path) - 1);
++	if (length <= 0)
++		return NULL;
++
++	path[length] = '\0';
++
++	/* Expected installation path: $PREFIX/bin/proot. */
++	slash = strrchr(path, '/');
++	if (slash == NULL)
++		return NULL;
++	*slash = '\0';
++
++	slash = strrchr(path, '/');
++	if (slash == NULL)
++		return NULL;
++	*slash = '\0';
++
++	return talloc_strdup(talloc_autofree_context(), path);
++}
++
++static const char *resolve_unbundled_loader_path(const Tracee *tracee,
++		bool wants_32bit_version)
++{
++#if defined(HAS_LOADER_32BIT)
++	static char *loader32_path = NULL;
++#endif
++	static char *loader_path = NULL;
++	const char *env_name;
++	const char *env_path;
++	const char *prefix;
++	char **cache;
++
++#if defined(HAS_LOADER_32BIT)
++	if (wants_32bit_version) {
++		env_name = "PROOT_LOADER_32";
++		cache = &loader32_path;
++	}
++	else
++#endif
++	{
++		env_name = "PROOT_LOADER";
++		cache = &loader_path;
++	}
++
++	if (*cache != NULL)
++		return *cache;
++
++	env_path = getenv(env_name);
++	if (env_path != NULL && env_path[0] != '\0') {
++		*cache = (char *) env_path;
++		return *cache;
++	}
++
++	prefix = getenv("PREFIX");
++	if (prefix != NULL && prefix[0] != '\0')
++		*cache = format_unbundled_loader_path(prefix, wants_32bit_version);
++
++	if (*cache == NULL) {
++		char *derived_prefix = derive_prefix_from_executable();
++
++		if (derived_prefix != NULL)
++			*cache = format_unbundled_loader_path(derived_prefix,
++					wants_32bit_version);
++	}
++
++	if (*cache != NULL && tracee->verbose >= 2)
++		note(tracee, INFO, INTERNAL, "loader: %s", *cache);
++
++	return *cache;
++}
++#endif
++
+ /**
+  * Get the path to the loader for the given @tracee.  This function
+  * returns NULL if an error occurred.
+@@ -564,10 +651,10 @@ static inline const char *get_loader_path(const Tracee *tracee)
+ #if defined(PROOT_UNBUNDLE_LOADER)
+ #if defined(HAS_LOADER_32BIT)
+ 	if (IS_CLASS32(tracee->load_info->elf_header)) {
+-		return getenv("PROOT_LOADER_32") ?: PROOT_UNBUNDLE_LOADER "/loader32";
++		return resolve_unbundled_loader_path(tracee, true);
+ 	}
+ #endif
+-	return getenv("PROOT_LOADER") ?: PROOT_UNBUNDLE_LOADER "/loader";
++	return resolve_unbundled_loader_path(tracee, false);
+ #else
+ 	static char *loader_path = NULL;
+ 
+diff --git a/src/path/temp.c b/src/path/temp.c
+index dde2296..d737006 100644
+--- a/src/path/temp.c
++++ b/src/path/temp.c
+@@ -24,7 +24,14 @@ const char *get_temp_directory()
+ 
+ 	temp_directory = getenv("PROOT_TMP_DIR");
+ 	if (temp_directory == NULL) {
+-		temp_directory = P_tmpdir;
++		const char *prefix = getenv("PREFIX");
++
++		if (prefix != NULL && prefix[0] != '\0')
++			temp_directory = talloc_asprintf(talloc_autofree_context(),
++					"%s/tmp", prefix);
++	}
++	if (temp_directory == NULL) {
++		temp_directory = "/tmp";
+ 	}
+ 
+ 	tmp = realpath(temp_directory, NULL);
+
+

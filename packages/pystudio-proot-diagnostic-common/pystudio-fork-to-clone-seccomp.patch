@@ -1,0 +1,32 @@
+diff --git a/src/tracee/seccomp.c b/src/tracee/seccomp.c
+index ddf148c..4d7788e 100644
+--- a/src/tracee/seccomp.c
++++ b/src/tracee/seccomp.c
+@@ -154,6 +154,27 @@ static int handle_seccomp_event_common(Tracee *tracee)
+ 	}
+ 
+ 	switch (sysnum) {
++#if defined(ARCH_X86_64)
++	case PR_fork:
++		note(tracee, INFO, INTERNAL,
++			"pystudio trace: fork recovery original=%s raw=%" PRIu64 " -> clone(SIGCHLD, NULL, NULL, NULL, 0)",
++			stringify_sysnum(sysnum),
++			(uint64_t) peek_reg(tracee, CURRENT, SYSARG_NUM));
++		set_sysnum(tracee, PR_clone);
++		poke_reg(tracee, SYSARG_1, SIGCHLD);
++		poke_reg(tracee, SYSARG_2, 0);
++		poke_reg(tracee, SYSARG_3, 0);
++		poke_reg(tracee, SYSARG_4, 0);
++		poke_reg(tracee, SYSARG_5, 0);
++		poke_reg(tracee, SYSARG_6, 0);
++		note(tracee, INFO, INTERNAL,
++			"pystudio trace: fork recovery rewritten sys=%s arg1=0x%" PRIu64 " restart=seccomp",
++			stringify_sysnum(get_sysnum(tracee, CURRENT)),
++			(uint64_t) peek_reg(tracee, CURRENT, SYSARG_1));
++		restart_syscall_after_seccomp(tracee);
++		break;
++#endif
++
+ 	case PR_open:
+ 		set_sysnum(tracee, PR_openat);
+ 		poke_reg(tracee, SYSARG_4, peek_reg(tracee, CURRENT, SYSARG_3));

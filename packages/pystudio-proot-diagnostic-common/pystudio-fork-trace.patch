@@ -1,0 +1,334 @@
+diff --git a/src/cli/note.c b/src/cli/note.c
+index a48636d..776a868 100644
+--- a/src/cli/note.c
++++ b/src/cli/note.c
+@@ -25,6 +25,12 @@
+ #include <stdarg.h> /* va_*, */
+ #include <stdio.h>  /* vfprintf(3), */
+ #include <limits.h> /* INT_MAX, */
++#ifdef PYSTUDIO_FORK_TRACE
++#include <stdlib.h> /* getenv(3), */
++#include <sys/stat.h> /* mkdir(2), */
++#include <time.h>   /* time(2), */
++#include <unistd.h> /* getpid(2), */
++#endif
+ 
+ #include "cli/note.h"
+ #include "tracee/tracee.h"
+@@ -32,6 +38,51 @@
+ int global_verbose_level;
+ const char *global_tool_name;
+ 
++#ifdef PYSTUDIO_FORK_TRACE
++static FILE *pystudio_trace_log;
++static bool pystudio_trace_log_checked;
++
++static FILE *get_pystudio_trace_log(void)
++{
++	const char *path;
++	const char *prefix;
++	char generated_path[PATH_MAX];
++	char dir_path[PATH_MAX];
++	time_t now;
++
++	if (pystudio_trace_log_checked)
++		return pystudio_trace_log;
++	pystudio_trace_log_checked = true;
++
++	path = getenv("PYSTUDIO_PROOT_TRACE_LOG");
++	if (path == NULL || path[0] == '\0') {
++		prefix = getenv("PREFIX");
++		if (prefix == NULL || prefix[0] == '\0')
++			return NULL;
++		snprintf(dir_path, sizeof(dir_path), "%s/var", prefix);
++		(void) mkdir(dir_path, 0700);
++		snprintf(dir_path, sizeof(dir_path), "%s/var/log", prefix);
++		(void) mkdir(dir_path, 0700);
++		snprintf(dir_path, sizeof(dir_path), "%s/var/log/pystudio", prefix);
++		(void) mkdir(dir_path, 0700);
++		snprintf(generated_path, sizeof(generated_path),
++				"%s/proot-fork-trace.log", dir_path);
++		path = generated_path;
++	}
++
++	pystudio_trace_log = fopen(path, "a");
++	if (pystudio_trace_log == NULL)
++		return NULL;
++
++	now = time(NULL);
++	fprintf(pystudio_trace_log,
++		"\n[pystudio-proot-trace] pid=%ld time=%ld tool=%s\n",
++		(long) getpid(), (long) now, global_tool_name ?: "");
++	fflush(pystudio_trace_log);
++	return pystudio_trace_log;
++}
++#endif
++
+ /**
+  * Print @message to the standard error stream according to its
+  * @severity and @origin.
+@@ -40,6 +91,10 @@ void note(const Tracee *tracee, Severity severity, Origin origin, const char *me
+ {
+ 	const char *tool_name;
+ 	va_list extra_params;
++#ifdef PYSTUDIO_FORK_TRACE
++	va_list trace_params;
++	FILE *trace_log;
++#endif
+ 	int verbose_level;
+ 
+ 	if (tracee == NULL) {
+@@ -73,6 +128,9 @@ void note(const Tracee *tracee, Severity severity, Origin origin, const char *me
+ 		fprintf(stderr, "talloc: ");
+ 
+ 	va_start(extra_params, message);
++#ifdef PYSTUDIO_FORK_TRACE
++	va_copy(trace_params, extra_params);
++#endif
+ 	vfprintf(stderr, message, extra_params);
+ 	va_end(extra_params);
+ 
+@@ -92,6 +150,28 @@ void note(const Tracee *tracee, Severity severity, Origin origin, const char *me
+ 		break;
+ 	}
+ 
++#ifdef PYSTUDIO_FORK_TRACE
++	trace_log = get_pystudio_trace_log();
++	if (trace_log != NULL) {
++		fprintf(trace_log, "%s %s: ",
++			tool_name,
++			severity == ERROR ? "error" : severity == WARNING ? "warning" : "info");
++		if (origin == TALLOC)
++			fprintf(trace_log, "talloc: ");
++		vfprintf(trace_log, message, trace_params);
++		switch (origin) {
++		case SYSTEM:
++			fprintf(trace_log, ": %s\n", strerror(errno));
++			break;
++		default:
++			fprintf(trace_log, "\n");
++			break;
++		}
++		fflush(trace_log);
++	}
++	va_end(trace_params);
++#endif
++
+ 	return;
+ }
+ 
+diff --git a/src/syscall/enter.c b/src/syscall/enter.c
+index 1663bbe..2af2819 100644
+--- a/src/syscall/enter.c
++++ b/src/syscall/enter.c
+@@ -30,6 +30,7 @@
+ #include <string.h>      /* strcpy */
+ #include <stdbool.h>     /* bool */
+ #include <stdint.h>      /* uint32_t */
++#include <inttypes.h>    /* PRI*, */
+ #include <sys/prctl.h>   /* PR_SET_DUMPABLE */
+ #include <sys/mount.h>   /* MS_BIND, MS_REMOUNT, ... */
+ #include <sys/socket.h>  /* AF_NETLINK, AF_UNIX, SOCK_DGRAM, SOCK_CLOEXEC */
+@@ -1967,10 +1968,16 @@ int translate_syscall_enter(Tracee *tracee)
+ 	 * mount(2) calls in the child would leak into the parent).  */
+ 	case PR_clone: {
+ 		word_t flags = peek_reg(tracee, CURRENT, SYSARG_1);
++		note(tracee, INFO, INTERNAL,
++			"pystudio trace: clone enter pid=%ld flags=0x%" PRIx64,
++			(long) tracee->pid, (uint64_t) flags);
+ 		if ((flags & CLONE_NS_MASK) != 0) {
+ 			if ((flags & CLONE_NEWNS) != 0)
+ 				tracee->clone_stripped_newns = true;
+ 			poke_reg(tracee, SYSARG_1, flags & ~(word_t) CLONE_NS_MASK);
++			note(tracee, INFO, INTERNAL,
++				"pystudio trace: clone stripped namespace flags -> 0x%" PRIx64,
++				(uint64_t) (flags & ~(word_t) CLONE_NS_MASK));
+ 		}
+ 		status = 0;
+ 		break;
+@@ -1979,15 +1986,24 @@ int translate_syscall_enter(Tracee *tracee)
+ 	case PR_clone3: {
+ 		word_t args_addr = peek_reg(tracee, CURRENT, SYSARG_1);
+ 		word_t flags;
++		note(tracee, INFO, INTERNAL,
++			"pystudio trace: clone3 enter pid=%ld args=0x%" PRIx64,
++			(long) tracee->pid, (uint64_t) args_addr);
+ 
+ 		if (args_addr != 0) {
+ 			errno = 0;
+ 			flags = peek_word(tracee, args_addr);
++			note(tracee, INFO, INTERNAL,
++				"pystudio trace: clone3 flags read errno=%d flags=0x%" PRIx64,
++				errno, (uint64_t) flags);
+ 			if (errno == 0 && (flags & CLONE_NS_MASK) != 0) {
+ 				if ((flags & CLONE_NEWNS) != 0)
+ 					tracee->clone_stripped_newns = true;
+ 				poke_word(tracee, args_addr,
+ 					  flags & ~(word_t) CLONE_NS_MASK);
++				note(tracee, INFO, INTERNAL,
++					"pystudio trace: clone3 stripped namespace flags -> 0x%" PRIx64,
++					(uint64_t) (flags & ~(word_t) CLONE_NS_MASK));
+ 			}
+ 		}
+ 		status = 0;
+diff --git a/src/tracee/event.c b/src/tracee/event.c
+index 4a64eda..7ccf31f 100644
+--- a/src/tracee/event.c
++++ b/src/tracee/event.c
+@@ -90,6 +90,7 @@ int launch_process(Tracee *tracee, char *const argv[])
+ 	if (tracee->verbose > 0)
+ 		list_open_fd(tracee);
+ 
++	note(tracee, INFO, INTERNAL, "pystudio trace: initial fork begin exe=%s", tracee->exe ?: "(null)");
+ 	pid = fork();
+ 	switch(pid) {
+ 	case -1:
+@@ -97,6 +98,7 @@ int launch_process(Tracee *tracee, char *const argv[])
+ 		return -errno;
+ 
+ 	case 0: /* child */
++		note(tracee, INFO, INTERNAL, "pystudio trace: initial child pid=%ld before PTRACE_TRACEME", (long) getpid());
+ 		/* Declare myself as ptraceable before executing the
+ 		 * requested program. */
+ 		status = ptrace(PTRACE_TRACEME, 0, NULL, NULL);
+@@ -104,6 +106,7 @@ int launch_process(Tracee *tracee, char *const argv[])
+ 			note(tracee, ERROR, SYSTEM, "ptrace(TRACEME)");
+ 			return -errno;
+ 		}
++		note(tracee, INFO, INTERNAL, "pystudio trace: initial child PTRACE_TRACEME ok");
+ 
+ 		/* Synchronize with the tracer's event loop.  Without
+ 		 * this trick the tracer only sees the "return" from
+@@ -114,8 +117,16 @@ int launch_process(Tracee *tracee, char *const argv[])
+ 
+ 		/* Improve performance by using seccomp mode 2, unless
+ 		 * this support is explicitly disabled.  */
+-		if (getenv("PROOT_NO_SECCOMP") == NULL)
+-			(void) enable_syscall_filtering(tracee);
++		if (getenv("PROOT_NO_SECCOMP") == NULL) {
++			status = enable_syscall_filtering(tracee);
++			note(tracee, INFO, INTERNAL,
++				"pystudio trace: enable_syscall_filtering status=%ld",
++				status);
++		}
++		else {
++			note(tracee, INFO, INTERNAL,
++				"pystudio trace: enable_syscall_filtering skipped by PROOT_NO_SECCOMP");
++		}
+ 
+ 		/* Now process is ptraced, so the current rootfs is already the
+ 		 * guest rootfs.  Note: Valgrind can't handle execve(2) on
+@@ -127,6 +138,7 @@ int launch_process(Tracee *tracee, char *const argv[])
+ 	default: /* parent */
+ 		/* We know the pid of the first tracee now.  */
+ 		tracee->pid = pid;
++		note(tracee, INFO, INTERNAL, "pystudio trace: initial parent got child pid=%ld", (long) pid);
+ 		return 0;
+ 	}
+ 
+@@ -472,9 +484,14 @@ int handle_tracee_event(Tracee *tracee, int tracee_status)
+ 			deliver_sigtrap = true;
+ 
+ 			/* Try to enable seccomp mode 2...  */
++			note(tracee, INFO, INTERNAL,
++				"pystudio trace: PTRACE_SETOPTIONS pid=%ld with TRACESECCOMP",
++				(long) tracee->pid);
+ 			status = ptrace(PTRACE_SETOPTIONS, tracee->pid, NULL,
+ 					default_ptrace_options | PTRACE_O_TRACESECCOMP);
+ 			if (status < 0) {
++				note(tracee, WARNING, SYSTEM,
++					"pystudio trace: PTRACE_SETOPTIONS with TRACESECCOMP failed");
+ 				/* ... otherwise use default options only.  */
+ 				status = ptrace(PTRACE_SETOPTIONS, tracee->pid, NULL,
+ 						default_ptrace_options);
+@@ -482,6 +499,8 @@ int handle_tracee_event(Tracee *tracee, int tracee_status)
+ 					note(tracee, ERROR, SYSTEM, "ptrace(PTRACE_SETOPTIONS)");
+ 					exit(EXIT_FAILURE);
+ 				}
++				note(tracee, INFO, INTERNAL,
++					"pystudio trace: PTRACE_SETOPTIONS fallback without TRACESECCOMP ok");
+ 				/* Without PTRACE_O_TRACESECCOMP, a seccomp filter
+ 				 * installed by the tracee that returns
+ 				 * SECCOMP_RET_TRACE would silently return -ENOSYS
+@@ -492,6 +511,8 @@ int handle_tracee_event(Tracee *tracee, int tracee_status)
+ 				 * interception working.  */
+ 				seccomp_ptrace_event_supported = false;
+ 			} else {
++				note(tracee, INFO, INTERNAL,
++					"pystudio trace: PTRACE_SETOPTIONS with TRACESECCOMP ok");
+ 				/* PTRACE_SETOPTIONS succeeded, but some old
+ 				 * Android kernels (e.g. 3.1.x nougat) silently
+ 				 * accept unknown option bits without implementing
+@@ -499,6 +520,9 @@ int handle_tracee_event(Tracee *tracee, int tracee_status)
+ 				 * PTRACE_EVENT_SECCOMP requires Linux >= 3.5.  */
+ 				seccomp_ptrace_event_supported =
+ 					kernel_supports_ptrace_event_seccomp();
++				note(tracee, INFO, INTERNAL,
++					"pystudio trace: kernel_supports_ptrace_event_seccomp=%d",
++					seccomp_ptrace_event_supported);
+ 			}
+ 		}
+ 			/* Fall through. */
+@@ -654,12 +678,18 @@ int handle_tracee_event(Tracee *tracee, int tracee_status)
+ 
+ 		case SIGTRAP | PTRACE_EVENT_VFORK << 8:
+ 			signal = 0;
++			note(tracee, INFO, INTERNAL,
++				"pystudio trace: PTRACE_EVENT_VFORK pid=%ld sys=%s",
++				(long) tracee->pid, stringify_sysnum(get_sysnum(tracee, CURRENT)));
+ 			(void) new_child(tracee, CLONE_VFORK);
+ 			break;
+ 
+ 		case SIGTRAP | PTRACE_EVENT_FORK  << 8:
+ 		case SIGTRAP | PTRACE_EVENT_CLONE << 8:
+ 			signal = 0;
++			note(tracee, INFO, INTERNAL,
++				"pystudio trace: PTRACE_EVENT_FORK_OR_CLONE pid=%ld sys=%s",
++				(long) tracee->pid, stringify_sysnum(get_sysnum(tracee, CURRENT)));
+ 			(void) new_child(tracee, 0);
+ 			break;
+ 
+@@ -691,6 +721,10 @@ int handle_tracee_event(Tracee *tracee, int tracee_status)
+ 		case SIGSYS: {
+ 			siginfo_t siginfo = {};
+ 			ptrace(PTRACE_GETSIGINFO, tracee->pid, NULL, &siginfo);
++			note(tracee, INFO, INTERNAL,
++				"pystudio trace: SIGSYS pid=%ld code=%d syscall=%d arch=%u",
++				(long) tracee->pid, siginfo.si_code,
++				siginfo.si_syscall, siginfo.si_arch);
+ 			if (siginfo.si_code == SYS_SECCOMP) {
+ 				/* Signal cannot happen when we're inside syscall,
+ 				 * tracee would have to exit from syscall first.
+diff --git a/src/tracee/seccomp.c b/src/tracee/seccomp.c
+index 66dfef3..ddf148c 100644
+--- a/src/tracee/seccomp.c
++++ b/src/tracee/seccomp.c
+@@ -7,6 +7,7 @@
+ #include <linux/net.h> /* SYS_SENDMMSG */
+ #include <assert.h>    /* assert(3), */
+ #include <time.h>      /* time(2), */
++#include <inttypes.h>  /* PRI*, */
+ 
+ #include "extension/extension.h"
+ #include "cli/note.h"
+@@ -113,6 +114,10 @@ int handle_seccomp_event(Tracee* tracee)
+ #endif
+ 
+ 	print_current_regs(tracee, 3, "seccomp SIGSYS");
++	note(tracee, INFO, INTERNAL,
++		"pystudio trace: handle_seccomp_event current=%s raw=%" PRIu64,
++		stringify_sysnum(get_sysnum(tracee, CURRENT)),
++		(uint64_t) peek_reg(tracee, CURRENT, SYSARG_NUM));
+ 
+ 	return handle_seccomp_event_common(tracee);
+ }
+@@ -137,6 +142,9 @@ static int handle_seccomp_event_common(Tracee *tracee)
+ 	Sysnum sysnum = get_sysnum(tracee, CURRENT);
+ 
+ 	sysnum = get_sysnum(tracee, CURRENT);
++	note(tracee, INFO, INTERNAL,
++		"pystudio trace: handle_seccomp_event_common sys=%s",
++		stringify_sysnum(sysnum));
+ 
+ 	status = notify_extensions(tracee, SIGSYS_OCC, 0, 0);
+ 	if (status < 0) {
