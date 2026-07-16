@@ -1,0 +1,35 @@
+diff --git a/src/tracee/event.c b/src/tracee/event.c
+--- a/src/tracee/event.c
++++ b/src/tracee/event.c
+@@ -27,5 +27,6 @@
+ #include <sys/utsname.h> /* uname(2), */
+ #include <unistd.h>     /* fork(2), chdir(2), getpid(2), */
++#include <signal.h>     /* sigemptyset(3), sigprocmask(2), */
+ #include <string.h>     /* strcmp(3), */
+ #include <errno.h>      /* errno(3), */
+ #include <stdbool.h>    /* bool, true, false, */
+@@ -80,6 +81,7 @@ int launch_process(Tracee *tracee, char *const argv[])
+ 	char *const default_argv[] = { "-sh", NULL };
+ 	long status;
+ 	pid_t pid;
++	sigset_t empty_mask;
+ 
+ 	/* Set pokedata workaround stub addr if needed. */
+ 	mem_prepare_before_first_execve(tracee);
+@@ -98,6 +100,16 @@ int launch_process(Tracee *tracee, char *const argv[])
+ 
+ 	case 0: /* child */
+ 		note(tracee, INFO, INTERNAL, "pystudio trace: initial child pid=%ld before PTRACE_TRACEME", (long) getpid());
++		(void) sigemptyset(&empty_mask);
++		status = sigprocmask(SIG_SETMASK, &empty_mask, NULL);
++		if (status < 0) {
++			note(tracee, ERROR, SYSTEM,
++				"pystudio trace: reset initial tracee signal mask");
++			return -errno;
++		}
++		note(tracee, INFO, INTERNAL,
++			"pystudio trace: initial tracee signal mask reset");
++
+ 		/* Declare myself as ptraceable before executing the
+ 		 * requested program. */
+ 		status = ptrace(PTRACE_TRACEME, 0, NULL, NULL);
